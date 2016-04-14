@@ -4,29 +4,36 @@
     * Author: Kirill-I
     * Author URI: https://github.com/indiscipline
     * Licence: GPL v2 or later
-    * Version: 1.0
+    * Version: 1.1
 ]]
 
 --[[
     * Changelog:
+    * v1.1 (2016-04-14)
+        + Added global compression
+        + Added expansion functionality
+        * Taking selection into account
     * v1.0 (2016-04-12)
         + initial release
 --]]
 
---- Keep integer in possible MIDI range.
--- Returns 0 if input is negative,
--- and 127 if input is > 127
--- @param par MIDI parameter integer
+--- Keep integer in given range.
+-- Returns low if input < low and high if input > high.
+-- Doesn't change par if it's in range.
+-- If either of the caps is nil, doesn't limit at that extreme.
+-- Use 0 and 127 for MIDI.
+-- @param par Parameter integer
+-- @param low Lower cap, bypassed if nil
+-- @param high Higher cap, bypassed if nil
 -- @return integer
-function midi_saturate_par(par)
-    if par < 0 then
-        par = 0
-    elseif par > 127 then
-        par = 127
-    elseif par == nil then
-        par = 0
+function saturate_par(par, low, high)
+    if low ~= nil and par < low then
+        return low
+    elseif high~= nil and par > high then
+        return high
+    else
+        return par
     end
-    return par
 end
 
 --- Rounding function.
@@ -45,95 +52,134 @@ end
 -- @param take Current Reaper MIDI take
 -- @return pitch_table
 function get_pitch_table(midieditor, take, notes)
-    local pitch_table, pitch, vel
+    local pitch_table
     pitch_table = {}
     if notes > 1 then
         for i = 0, notes-1 do
-            _, _, _, _, _, _, pitch, vel = reaper.MIDI_GetNote(take, i)
-            if pitch_table[pitch] == nil then
-                pitch_table[pitch] = {}
-                --reaper.ShowConsoleMsg("\nadded new pitch "..pitch)
-            else
-                --reaper.ShowConsoleMsg("\npitch present "..pitch)
+            local pitch, vel, is_sel
+            _, is_sel, _, _, _, _, pitch, vel = reaper.MIDI_GetNote(take, i)
+            if is_sel then
+                if pitch_table[pitch] == nil then
+                    pitch_table[pitch] = {}
+                    --reaper.ShowConsoleMsg("\nadded new pitch "..pitch)
+                else
+                    --reaper.ShowConsoleMsg("\npitch present "..pitch)
+                end
+                --reaper.ShowConsoleMsg("\nadding to table: id="..i.." vel="..vel)
+                pitch_table[pitch][i] = vel
             end
-            pitch_table[pitch][i] = vel
         end
     end
     return pitch_table
 end
 
---- Compress an array of given pitch MIDI notes.
+--- Compress/Expand an array of given pitch MIDI notes.
 -- Note array contains note ID and velocities
 -- function calculates average velocity and adjust each note by given %
 -- @param take Current Reaper MIDI take
 -- @param notes Array of MIDI notes keyed by Reaper ID
 -- @param comp_rate Compression rate in %
-function compress_note_array(take, notes, comp_rate)
-    if notes == nil then
+function compress_note_array(take, note_arr, comp_rate)
+    if note_arr == nil or take == nil then
         return
     end
 
-    local av_vel, len
-    av_vel = 0
-    len = 0
-    for _, vel in pairs(notes) do
+    local av_vel, len = 0, 0
+
+    for _, vel in pairs(note_arr) do
         av_vel = av_vel + vel
         len = len + 1
     end
 
     if len == 0 then
-      return
+        return
     end
+
+    -- When compression rate > %100, velocities cross the average so
+    -- dynamics get inversed. If you need this, comment the statement.
+    -- For expansion this doesn't matter because notes just get farther
+    -- from the average and eventualy will be capped by MIDI limits.
+    comp_rate=saturate_par(comp_rate,nil,100)
 
     av_vel = av_vel / len
     --reaper.ShowConsoleMsg("\n Average velocity: "..av_vel)
-    -- Actual computation
-    for id, vel in pairs(notes) do
-        local delta, new_vel
-        delta = (vel - av_vel) / 100 * comp_rate
-        new_vel = round(vel - delta)
+    --Actual computation
+    for id, vel in pairs(note_arr) do
+        local delta = (vel - av_vel) / 100 * comp_rate
+        local new_vel = saturate_par(round(vel - delta),0,127)
         --reaper.ShowConsoleMsg("\nid="..id.." vel="..vel.." new_vel="..new_vel.." delta="..delta)
         reaper.MIDI_SetNote(take, id, NULL, NULL, NULL, NULL, NULL, NULL, new_vel)
     end
 end
 
---- Compress selected MIDI notes, be each pitch.
--- General function of the script. Compresses each pitch separately.
+--- Compress/Expand selected MIDI notes, by each pitch then globally.
+-- Positive values for compression, negative for expansion.
 -- Populates a table which stores all the notes sorted by pitch and
--- compresses each array of notes of each pitch.
--- @param comp_rate Compression rate in %
-function main(comp_rate)
-    if comp_rate == nil then
-        return
-    end
+-- processes each array of notes of each pitch,
+-- then processes all the notes
+-- @param pitch_comp Pitch-compression rate in %, negative for expansion
+-- @param glob_comp  Global compression rate in %, negative for expansion
+function main(pitch_comp, glob_comp)
 
-    local midieditor, take, notes, pitch_table
-
-    midieditor = reaper.MIDIEditor_GetActive()
+    local midieditor = reaper.MIDIEditor_GetActive()
     if midieditor == nil then
         return nil
     end
 
-    take = reaper.MIDIEditor_GetTake(midieditor)
+    local take = reaper.MIDIEditor_GetTake(midieditor)
     if take == nil then
         return nil
     end
 
+    local notes
     _, notes = reaper.MIDI_CountEvts(take)
 
-    pitch_table = get_pitch_table(midieditor, take, notes)
+-- Pitch compression
+    if pitch_comp ~= 0 then
+        local pitch_table = get_pitch_table(midieditor, take, notes)
+        for pitch,note_arr in pairs(pitch_table) do
+            --reaper.ShowConsoleMsg("\nCompressing pitch "..pitch)
+            compress_note_array(take, note_arr, pitch_comp)
+        end
+    end
 
-    for pitch,arr in pairs(pitch_table) do
-        --reaper.ShowConsoleMsg("\nCompressing pitch "..pitch)
-        compress_note_array(take, arr, comp_rate)
+-- Global compression
+    if notes > 1 and glob_comp ~= 0 then
+        local note_arr = {}
+        for i = 0, notes-1 do
+            local vel, is_sel
+            _, is_sel, _, _, _, _, _, vel = reaper.MIDI_GetNote(take, i)
+            if is_sel then
+                --reaper.ShowConsoleMsg("\ni="..i.." vel="..vel)
+                note_arr[i] = vel
+            end
+        end
+        --reaper.ShowConsoleMsg("\nCompressing all selected notes")
+        compress_note_array(take, note_arr, glob_comp)
     end
 end
 
-ret_val, comp_ret = reaper.GetUserInputs("MIDI compression for each pitch", 1, 'Compression %', '75')
-comp_rate = tonumber(comp_ret)
+--- Get user input.
+-- Returns basic user iput in numerical form
+-- Returns false on fail. Add pars to taste.
+-- @return ret_val Success boolean
+-- @return par1 Pitch compression
+-- @return par2 Global compression
+function get_user_input()
+    local ret_val, par_csv, par1, par2
 
-if (comp_rate ~= nil) and (ret_val ~= false) then
+    ret_val, par_csv = reaper.GetUserInputs("MIDI compression for each pitch", 2, 'Pitch compression %,Global compression %', '75,25')
+    par1, par2 = par_csv:match("([^,]+),([^,]+)")
+
+    par1 = tonumber(par1)
+    par2 = tonumber(par2)
+
+    return ret_val, par1, par2
+end
+
+ret_val, pitch_comp, glob_comp = get_user_input()
+if ret_val and pitch_comp ~= nil and glob_comp ~= nil then
     reaper.Undo_BeginBlock()
-    main(comp_rate)
-    reaper.Undo_EndBlock("MIDI: compressed each pitch by %"..comp_rate, 0)
+    main(pitch_comp, glob_comp)
+    reaper.Undo_EndBlock("MIDI: Each pitch compressed separately", 0)
 end
