@@ -4,11 +4,13 @@
     * Author: Kirill-I
     * Author URI: https://github.com/indiscipline
     * Licence: GPL v2 or later
-    * Version: 1.1
+    * Version: 1.2
 ]]
 
 --[[
     * Changelog:
+    * v1.2 (2016-04-15)
+        * Fixed note deletion when expanding if zeroing velocity.
     * v1.1 (2016-04-14)
         + Added global compression
         + Added expansion functionality
@@ -21,7 +23,7 @@
 -- Returns low if input < low and high if input > high.
 -- Doesn't change par if it's in range.
 -- If either of the caps is nil, doesn't limit at that extreme.
--- Use 0 and 127 for MIDI.
+-- Use 1 and 127 for MIDI.
 -- @param par Parameter integer
 -- @param low Lower cap, bypassed if nil
 -- @param high Higher cap, bypassed if nil
@@ -106,7 +108,7 @@ function compress_note_array(take, note_arr, comp_rate)
     --Actual computation
     for id, vel in pairs(note_arr) do
         local delta = (vel - av_vel) / 100 * comp_rate
-        local new_vel = saturate_par(round(vel - delta),0,127)
+        local new_vel = saturate_par(round(vel - delta),1,127)
         --reaper.ShowConsoleMsg("\nid="..id.." vel="..vel.." new_vel="..new_vel.." delta="..delta)
         reaper.MIDI_SetNote(take, id, NULL, NULL, NULL, NULL, NULL, NULL, new_vel)
     end
